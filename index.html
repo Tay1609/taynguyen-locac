@@ -482,8 +482,17 @@ body {
         <button class="btn btn-gold" onclick="applyFilter()">⚡ Lọc AC</button>
         <button class="btn btn-outline" onclick="resetFilters()">↺ Reset Bộ Lọc</button>
       </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn btn-accent" onclick="removeDuplicates()">🧹 Lọc Trùng</button>
+        
+        <button class="btn btn-outline" onclick="splitFilePrompt()">✂️ Tách File</button>
+        <button class="btn btn-green" onclick="shuffleAccounts()">🎲 Random AC</button>
+      </div>
+
     </div>
   </div>
+
+  
 
   <!-- RESULTS -->
   <div class="card" id="resultsCard" style="display:none">
@@ -1350,6 +1359,133 @@ function debugParse() {
 
 
 document.getElementById('animeTrashInput').addEventListener('keydown',e=>{if(e.key==='Enter')addTrash('anime');});
+
+// ===== NEW FEATURES =====
+
+// Lọc trùng AC
+function removeDuplicates() {
+  if(!allACs.length){
+    notify('Chưa có dữ liệu!','error');
+    return;
+  }
+
+  const seen = new Set();
+  const unique = [];
+
+  for(const ac of allACs){
+    const key = ac.raw.trim().toLowerCase();
+    if(!seen.has(key)){
+      seen.add(key);
+      unique.push(ac);
+    }
+  }
+
+  const removed = allACs.length - unique.length;
+  allACs = unique;
+  filteredACs = [...unique];
+
+  document.getElementById('totalCount').textContent = allACs.length;
+  document.getElementById('filteredCount').textContent = filteredACs.length;
+  document.getElementById('removedCount').textContent = removed;
+
+  showResults(filteredACs);
+  notify(`Đã lọc ${removed} AC trùng!`, 'success');
+}
+
+// Gộp file
+function mergeFiles() {
+  if(!allACs.length){
+    notify('Không có dữ liệu để gộp!','error');
+    return;
+  }
+
+  const content = allACs.map(ac => ac.raw).join('\n\n');
+  const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `gop-file-${allACs.length}-ac.txt`;
+  a.click();
+
+  URL.revokeObjectURL(url);
+
+  notify(`Đã gộp ${allACs.length} AC thành 1 file!`, 'success');
+}
+
+// Tách file
+function splitFilePrompt() {
+  if(!filteredACs.length){
+    notify('Không có dữ liệu để tách!','error');
+    return;
+  }
+
+  const amount = prompt('Nhập số lượng AC muốn tách ra:', '5000');
+
+  if(!amount) return;
+
+  const count = parseInt(amount);
+
+  if(isNaN(count) || count <= 0){
+    notify('Số lượng không hợp lệ!','error');
+    return;
+  }
+
+  const splitData = filteredACs.slice(0, count);
+
+  if(!splitData.length){
+    notify('Không đủ AC để tách!','error');
+    return;
+  }
+
+  const content = splitData.map(ac => ac.raw).join('\n\n');
+
+  const blob = new Blob([content], {
+    type:'text/plain;charset=utf-8'
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tach-${splitData.length}-ac.txt`;
+  a.click();
+
+  URL.revokeObjectURL(url);
+
+  notify(`Đã tách ${splitData.length} AC!`, 'success');
+}
+
+// Random / Trộn AC
+function shuffleAccounts() {
+  if(!filteredACs.length){
+    notify('Không có AC để random!','error');
+    return;
+  }
+
+  for(let i = filteredACs.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [filteredACs[i], filteredACs[j]] = [filteredACs[j], filteredACs[i]];
+  }
+
+  showResults(filteredACs);
+
+  notify('Đã random / trộn AC!', 'success');
+}
+
+
+
+
+
+
+
+
+
+
+
 </script>
+
+
+
 </body>
 </html>
