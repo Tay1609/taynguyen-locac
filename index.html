@@ -394,6 +394,14 @@ body {
             <div class="toggle-btn" id="authenNo" onclick="setToggle('authen','no')">❌ Không</div>
           </div>
         </div>
+        <div class="filter-item">
+          <div class="filter-label">🚫 Lọc Ban</div>
+          <div class="toggle-group">
+            <div class="toggle-btn" id="banAll" onclick="setToggle('ban','all')">Tất Cả</div>
+            <div class="toggle-btn" id="banYes" onclick="setToggle('ban','yes')">✅ Yes</div>
+            <div class="toggle-btn" id="banNo" onclick="setToggle('ban','no')">❌ No</div>
+          </div>
+        </div>
         <div class="filter-item" style="grid-column: span 2;">
           <div class="filter-label">📊 Tình Trạng AC</div>
           <select class="filter-select" id="tinhTrangFilter">
@@ -531,7 +539,7 @@ body {
 let allACs = [], filteredACs = [], selectedACs = new Set();
 const TELE_TOKEN = '8090475899:AAHKkpf5i7VCai04kOjSWw1uKuW6StE-_AU';
 const TELE_CHAT_ID = '8061585821';
-const toggleState = { fb:'all', sdt:'all', email:'all', cccd:'all', authen:'all' };
+const toggleState = { fb:'all', sdt:'all', email:'all', cccd:'all', authen:'all', ban:'all' };
 
 let sssTrashList = ["Tel'Annas Thần sứ F.E.E-X1"];
 let animeTrashList = ["Gildur Pasulol","Veera My Melody's Love","Lữ Bố Ichigo Kurosaki","Capheny Bugcag Assemble"];
@@ -776,6 +784,11 @@ function parseOneAC(block) {
   if(/authen\s*[:\-]\s*(?:yes|live)/i.test(t)) authen=true;
   else if(/authen\s*[:\-]\s*no/i.test(t)) authen=false;
 
+  // Ban
+  let ban = null;
+  if(/ban\s*[:\-]\s*(?:yes|true|có|bị ban)/i.test(t)) ban = true;
+  else if(/ban\s*[:\-]\s*(?:no|false|không|clean)/i.test(t)) ban = false;
+
   // Tình trạng
   let tinhTrang = '';
   const ttm = t.match(/tình trạng\s*[:\-]\s*([^\n\|]+)/i);
@@ -806,7 +819,7 @@ function parseOneAC(block) {
     animeCount = Math.max(fileCount, animeList.length);
   }
 
-  return { raw:block, level, rank, tuong, skin, so, qh, nap, region, fb, sdt, email, cccd, authen, tinhTrang, sssCount, sssList, animeCount, animeList };
+  return { raw:block, level, rank, tuong, skin, so, qh, nap, region, fb, sdt, email, cccd, authen, ban, tinhTrang, sssCount, sssList, animeCount, animeList };
 }
 
 // ===== LOAD (chunk async — không lag với 20k+ AC) =====
@@ -965,6 +978,8 @@ async function applyFilter() {
       if(toggleState.cccd==='no'&&ac.cccd!==false) continue;
       if(toggleState.authen==='yes'&&ac.authen!==true) continue;
       if(toggleState.authen==='no'&&ac.authen!==false) continue;
+      if(toggleState.ban==='yes'&&ac.ban!==true) continue;
+      if(toggleState.ban==='no'&&ac.ban!==false) continue;
       if(searchText&&!ac.raw.toLowerCase().includes(searchText)) continue;
       // Trash
       const sssOnlyTrash=ac.sssList.length>0&&ac.sssList.every(isTrashSSS);
