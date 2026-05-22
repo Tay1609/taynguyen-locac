@@ -1234,7 +1234,7 @@ async function sendToTelegram() {
 }
 
 async function sendFilesToTelegram(files) {
-  const TELE_MAX_BYTES = 49 * 1024 * 1024; // 49MB giới hạn Telegram
+  const TELE_MAX_BYTES = 45 * 1024 * 1024; // 45MB — an toàn hơn 49MB giới hạn Telegram
 
   // Chia text thành các chunks, mỗi chunk KHÔNG vượt maxBytes
   function splitTextIntoChunks(text, maxBytes) {
@@ -1276,29 +1276,48 @@ async function sendFilesToTelegram(files) {
     return new Blob([text], { type: 'text/plain;charset=utf-8' });
   }
 
-  // FIX: throw nếu Telegram trả về lỗi thay vì âm thầm bỏ qua
+  // Retry helper: thử lại tối đa maxRetry lần, chờ delay ms giữa mỗi lần
+  async function withRetry(fn, maxRetry, delay) {
+    maxRetry = maxRetry || 3; delay = delay || 3000;
+    var lastErr;
+    for (var attempt = 1; attempt <= maxRetry; attempt++) {
+      try { return await fn(); }
+      catch (e) {
+        lastErr = e;
+        console.warn('Lan ' + attempt + '/' + maxRetry + ' that bai:', e.message);
+        if (attempt < maxRetry) await new Promise(function(r){ setTimeout(r, delay * attempt); });
+      }
+    }
+    throw lastErr;
+  }
+
+  // Gửi file blob lên Telegram, tự retry 3 lần nếu lỗi mạng
   async function sendDocBlob(blob, filename, caption) {
-    const form = new FormData();
-    form.append('chat_id', TELE_CHAT_ID);
-    form.append('document', blob, filename);
-    if (caption) form.append('caption', caption);
-    const res = await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendDocument`, {
-      method: 'POST', body: form
+    return withRetry(async function() {
+      const form = new FormData();
+      form.append('chat_id', TELE_CHAT_ID);
+      form.append('document', blob, filename);
+      if (caption) form.append('caption', caption);
+      const res = await fetch('https://api.telegram.org/bot' + TELE_TOKEN + '/sendDocument', {
+        method: 'POST', body: form
+      });
+      const d = await res.json();
+      if (!d.ok) throw new Error(d.description || 'Telegram API error');
+      return d;
     });
-    const d = await res.json();
-    if (!d.ok) throw new Error(d.description || 'Telegram API error');
-    return d;
   }
 
   async function sendMsg(text) {
-    const res = await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TELE_CHAT_ID, text })
-    });
-    const d = await res.json();
-    if (!d.ok) console.warn('sendMsg failed:', d.description);
-    return d;
+    try {
+      const res = await fetch('https://api.telegram.org/bot' + TELE_TOKEN + '/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TELE_CHAT_ID, text: text })
+      });
+      const d = await res.json();
+      if (!d.ok) console.warn('sendMsg failed:', d.description);
+      return d;
+    } catch(e) { console.warn('sendMsg error:', e.message); }
   }
 
   try {
@@ -1365,6 +1384,7 @@ async function sendFilesToTelegram(files) {
             const partBlob = makeBlob(safeChunks[i]);
             const partName = `${baseName}_phan${i + 1}_trong${totalParts}.txt`;
             const partSizeMB = (partBlob.size / 1024 / 1024).toFixed(2);
+            notify(`📤 Đang gửi phần ${i+1}/${totalParts} (${partSizeMB}MB)...`, 'info');
             await sendDocBlob(partBlob, partName,
 `📄 ${file.name}
 📦 Phần ${i + 1}/${totalParts} — ${partSizeMB} MB`);
